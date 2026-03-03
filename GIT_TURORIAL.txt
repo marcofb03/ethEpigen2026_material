@@ -1,0 +1,8 @@
+1. Create a fork from the original GitHub
+2. In your fork -> Code -> Local/HTTPS -> copy link
+3. Open local terminal -> go to the directory target (es -/Desktop ) -> >git clone [LINK]
+4. A copy of the fork appears in your directory -> open it (-/Desktop/ethEpigen2026_material)
+5. First PULL : >git branch -> if "main" ->  >git pull origin main
+6. Prepare PUSH: >git add filename.txt OR >git add . (for everything)
+7. Commit push: >git commit -m "[COMMENT]"
+8. Actual PUSH: >git push origin main (if branch(?) is "main")
