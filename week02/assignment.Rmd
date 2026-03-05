@@ -1,0 +1,111 @@
+---
+title: "assignment"
+author: "Marco Fiorani Borraccino"
+output: html_document
+date: "2026-03-3"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, comment=NA)
+```
+
+```{r, }
+suppressPackageStartupMessages({
+  library(AnnotationHub) # to fetch genomes, annotations, etc.
+  library(ensembldb)     # to manipulate ensembl gene annotations
+  library(GenomicRanges) # data structure for genomic ranges 
+  library(epiwraps)      # visualization
+})
+#creating connection with AnnotationHub
+ah <- AnnotationHub()
+```
+
+TASK 1 
+Mouse database
+```{r, echo=TRUE, results="hold"}
+#loading mouse EnsDb
+query_tmp <- query(ah, c("Mus musculus", "EnsDb", "102", "GRCm38"))
+id<- query_tmp$ah_id[1]
+ensdb_mouse <- ah[[id]] 
+#check 
+organism(ensdb_mouse) 
+ensemblVersion(ensdb_mouse) 
+genome(ensdb_mouse)[[1]]
+
+```
+
+Drosophila M. database 
+```{r, echo=TRUE, results="hold"}
+#loading drosophila m. EnsDb
+ensdb_dro <- ah[["AH119285"]] 
+#check
+organism(ensdb_dro) 
+ensemblVersion(ensdb_dro) 
+genome(ensdb_dro)[[1]]
+```
+Downloading genome sequence
+```{r ,echo=TRUE, results="hold"}
+#Mus musculus (GRCm38)
+query_tmp <- query(ah, c("Mus musculus", "GRCm38", "2bit"))
+id <- query_tmp$ah_id[1]
+seq_mouse_2bit <- ah[[id]]
+seq_mouse_2bit
+
+#Drosophila melanogaster (BDGP6)
+query_tmp <- query(ah, c("Drosophila melanogaster", "BDGP6", "2bit"))
+id <- query_tmp$ah_id[1]
+seq_dro_2bit <- ah[[id]]
+seq_dro_2bit
+```
+TASK2
+How many different ensembl gene IDs and gene symbols are there for protein-coding genes?
+```{r, echo=TRUE, results="hold", comment=NA}
+mouse_pcg <- genes(ensdb_mouse, filter=~gene_biotype=="protein_coding")
+cat("Unique Ensembl Gene IDs:", length(mouse_pcg), "\n")
+cat("Unique Gene Symbols:", length(unique(mouse_pcg$gene_name)), "\n")
+
+# MY CURIOSITY - NOT GRADED
+gene_names <- mouse_pcg$gene_name
+duplicate_names_list <- unique(gene_names[duplicated(gene_names)])
+
+# Subset of genes sharing the same symbol
+mouse_duplicates <- mouse_pcg[mouse_pcg$gene_name %in% duplicate_names_list, c("gene_id", "gene_name")]
+
+# Overlaps of each gene with its "twin" 
+mouse_duplicates$same_name_overlap <- sapply(1:length(mouse_duplicates), function(i) {
+  #iterate over each ID
+  current_gene <- mouse_duplicates[i]
+  #Select only the other genes named the same
+  others_same_name <- mouse_duplicates[mouse_duplicates$gene_name == current_gene$gene_name]
+  #check overlaps only between "twin" genes
+  as.integer(any(countOverlaps(current_gene, others_same_name) > 1))
+})
+
+cat("\n")
+head(mouse_duplicates, 3)
+cat("\n")
+cat("IDs with no unique name (also overlapping = in the same locus):", length(mouse_duplicates), "\n")
+cat("IDs with no unique name and in different regions of the genome (not overlapping = diff loci):", sum(mouse_duplicates$same_name_overlap == 0), "\n")
+```
+Plot the distribution of the (spliced) length of protein-coding transcripts
+
+```{r, echo=TRUE, results="hold", comment=NA}
+#Extract each exons information for each protein coding genes
+mouse_pcg_exons <- exonsBy(ensdb_mouse, by = "gene", filter = ~ gene_biotype == "protein_coding")
+#take only spliced genes (so with more than 1 exon)
+mouse_pcg_exons <- mouse_pcg_exons[lengths(mouse_pcg_exons) > 1]
+
+gene_cdna_lengths <- sum(width(mouse_pcg_exons)) #width output a list of all lengths of all exons of a gene
+
+#histogram and basic analysis
+hist(gene_cdna_lengths, breaks = 200)
+abline(v = mean(gene_cdna_lengths), col = "red", lwd = 2, lty = 2) 
+abline(v = quantile(gene_cdna_lengths, 0.99), col = "blue", lwd = 2, lty = 2) #99% quartile 
+
+cat("Mean spliced cDNA: ", round(mean(gene_cdna_lengths))," (", round(mean(gene_cdna_lengths)/3), "aa)" , "\n")
+cat("Quartile 50% spliced cDNA: ", quantile(gene_cdna_lengths, 0.5)," (" ,round(quantile(gene_cdna_lengths, 0.5)/3),"aa)", "\n")
+cat("Quartile 99% spliced cDNA: ", round(quantile(gene_cdna_lengths, 0.99))," (" ,round(quantile(gene_cdna_lengths, 0.99)/3),"aa)", "\n")
+cat("Min lenght: ", min(gene_cdna_lengths) , ", ", mouse_pcg[names(gene_cdna_lengths)[which.min(gene_cdna_lengths)]]$gene_name[1]," (", round(min(gene_cdna_lengths)/3),"aa)", "\n")
+cat("Max lenght: ", max(gene_cdna_lengths) , ", ", mouse_pcg[names(gene_cdna_lengths)[which.max(gene_cdna_lengths)]]$gene_name[1]," (" ,round(max(gene_cdna_lengths)/3),"aa)", "\n")
+```
+
