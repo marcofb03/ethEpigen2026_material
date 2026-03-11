@@ -1,0 +1,310 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-03-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval=FALSE, warning = FALSE,  message = FALSE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread)      # read alignment
+  library(rtracklayer)   # read/write genomic file formats
+  library(Biostrings)    # handling sequences
+  library(Rfastp)        # read QC/trimming
+  library(epiwraps)
+})
+ah <- AnnotationHub()
+```
+
+```{r}
+setwd("/Users/marco/Desktop/ethEpigen2026_material/week03")
+```
+
+#### Downloading fastq file of CTCF
+```{r}
+options(timeout=3600)
+download.file("https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz","ENCFF127RRR.fastq.gz", mode="wb")
+```
+
+```{bash engine.opts='-l', eval=FALSE}
+mkdir -p raw_fastqc
+fastqc -o raw_fastqc --threads 4 *.fastq.gz
+```
+
+```{bash engine.opts='-l', eval=FALSE}
+multiqc -o raw_fastqc raw_fastqc
+```
+
+```{bash, eval=FALSE}
+export PATH="/Users/marco/miniconda3/bin:$PATH"
+
+mkdir -p trimmed
+
+trimmomatic SE -threads 4 \
+-summary trimmed/input.stats \
+-phred33 \
+ENCFF127RRR.fastq.gz \
+trimmed/trimmed.fastq.gz \
+ILLUMINACLIP:/Users/marco/miniconda3/share/trimmomatic-0.40-0/adapters/TruSeq3-SE.fa:2:15:4:4:true \
+LEADING:20 \
+TRAILING:20 \
+SLIDINGWINDOW:4:15 \
+MINLEN:25
+
+#Surviving 95% reads
+```
+ 
+#### Loading the genome
+```{r}
+options(timeout=5000)
+# we get the genome sequence from AnnotationHub
+genome <- ah[["AH49674"]]
+# we create a new directory that will contain the genome index
+dir.create("BDGP6_genome")
+# we write the genome sequence in fasta format
+export(import.2bit(genome), "BDGP6_genome/genome.fasta.gz", compress=TRUE)
+```
+
+#### Building a bowtie2 index
+```{bash engine.opts='-l'}
+bowtie2-build --threads 4 BDGP6_genome/genome.fasta.gz BDGP6_genome/bowtie2
+```
+
+#### Alignment
+```{bash engine.opts='-l'}
+mkdir -p aligned
+
+(bowtie2 -p 4 -x BDGP6_genome/bowtie2 -U trimmed/trimmed.fastq.gz) 2> aligned/aligned.bowtie2 |\
+  samtools view -bS - | samtools sort -@4 -m 2G - > aligned/aligned.bam
+samtools index aligned/aligned.bam
+
+#    3693508 (100.00%) were unpaired; of these:
+#    164910 (4.46%) aligned 0 times
+#    2910891 (78.81%) aligned exactly 1 time
+#    617707 (16.72%) aligned >1 times
+#.   95.54% overall alignment rate
+```
+
+#### Peak calling using MACS
+```{bash engine.opts='-l'}
+# hs mm dm
+mkdir -p peaks
+macs3 callpeak --outdir peaks -n ctcf --gsize dm -t aligned/aligned.bam -B #-c aligned/input.bam don't have + #.bdg file for coverage
+```
+
+```{r, eval=TRUE}
+peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+```
+
+```{r, echo = FALSE}
+library(Gviz)
+library(rtracklayer)
+#loading files
+peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+treat_gr <- rtracklayer::import("peaks/ctcf_treat_pileup.bdg", format = "bedGraph")
+lambda_gr <- rtracklayer::import("peaks/ctcf_control_lambda.bdg", format = "bedGraph")
+xls <- read.table("peaks/ctcf_peaks.xls", header = TRUE, comment.char = "#")
+
+#select the peak
+i <- 2000
+#selecting subset of peaks (Global vs Gene (protein_coding))
+my_peak <- peaks[i] 
+
+#---------------------------------------------------------------------------------------------------------------#
+#Matching narrowPeak and XLS (handles the 1bp offset)
+match_idx <- which(abs(xls$start - start(my_peak)) <= 1 & 
+                   (xls$chr == as.character(seqnames(my_peak)) | 
+                    xls$chr == gsub("chr", "", as.character(seqnames(my_peak)))))[1]
+
+if(is.na(match_idx)) stop(paste("No match", i))
+
+dati_xls <- xls[match_idx, ]
+
+#extract values for labels
+pileup_val   <- as.numeric(dati_xls$pileup)
+fc_effective <- as.numeric(dati_xls$fold_enrichment)
+bg_colored <- pileup_val / fc_effective
+
+#track signal
+strack <- DataTrack(range = treat_gr, 
+                    name = "Signal", 
+                    type = "histogram", 
+                    fill = "gray70", 
+                    col = "transparent")
+
+#background line
+ltrack <- DataTrack(range = lambda_gr, 
+                    name = "Background", 
+                    type = "polygon",
+                    type = "l", 
+                    col = "red", 
+                    lwd = 3) 
+
+#overlay
+otrack <- OverlayTrack(trackList = list(strack, ltrack))
+
+#peaks track
+labels <- rep(" ", length(peaks)); labels[i] <- "TARGET"
+colors <- rep("royalblue", length(peaks)); colors[i] <- "red"
+ptrack <- AnnotationTrack(peaks, name = "Peaks", id = labels, showId = TRUE,
+                          fill = colors, col = "transparent", just.group = "above")
+
+#final plot
+plotTracks(list(otrack, ptrack),
+           chromosome = as.character(seqnames(my_peak)),
+           from = start(my_peak) - 10000, 
+           to = end(my_peak) + 10000,
+           main = paste0("Peak ", i, " | FC: ", round(fc_effective, 2), "\n",
+                         "Local Background (Avg): ", round(bg_colored, 2), "reads"),
+           cex.main = 0.9,
+           fontface.main = 2,
+           ylim = c(0, max(pileup_val * 1.5, 50)))
+#---------------------------------------------------------------------------------------------------------------#
+```
+
+#### Filter the peak that fall into a gene
+```{r}
+library(ensembldb)
+library(GenomicRanges)
+
+#Save the original index on peaks
+peaks$old_index <- seq_along(peaks)
+
+#Get the Drosophila EnsDb and extract protein-coding genes
+ensdb_dro <- ah[["AH119285"]]
+
+prot_coding = FALSE
+
+if(prot_coding) {
+
+  dro_pcg <- genes(ensdb_dro, filter = ~ gene_biotype == "protein_coding")
+  
+  #Filter the peaks that fall inside a protein coding gene
+  peaks_filtered <- subsetByOverlaps(peaks, dro_pcg)
+
+} else {
+  dro_all <- genes(ensdb_dro)
+  
+  #Filter the peaks that fall inside a gene
+  peaks_filtered <- subsetByOverlaps(peaks, dro_all)
+}
+save(peaks_filtered, file = "peaks_filtered.RData")
+```
+
+## PLOT
+```{r, eval=TRUE,fig.width=12, fig.height=8, out.width="100%", fig.align='center'}
+library(Gviz)
+library(rtracklayer)
+
+#LOADING FOR KNIT
+options(ucscChromosomeNames = FALSE)
+library(AnnotationHub)
+ah <- AnnotationHub()
+ensdb_dro <- ah[["AH119285"]]
+
+#loading files
+load("peaks_filtered.RData")
+peaks <- rtracklayer::import("peaks/ctcf_peaks.narrowPeak")
+treat_gr <- rtracklayer::import("peaks/ctcf_treat_pileup.bdg", format = "bedGraph")
+lambda_gr <- rtracklayer::import("peaks/ctcf_control_lambda.bdg", format = "bedGraph")
+xls <- read.table("peaks/ctcf_peaks.xls", header = TRUE, comment.char = "#")
+
+#select the peak
+i <- 1500
+#selecting subset of peaks (Global vs Gene (protein_coding))
+#my_peak <- peaks[i] 
+my_peak <- peaks_filtered[i]
+
+#Matching narrowPeak and XLS (handles the 1bp offset)
+match_idx <- which(abs(xls$start - start(my_peak)) <= 1 & 
+                   (xls$chr == as.character(seqnames(my_peak)) | 
+                    xls$chr == gsub("chr", "", as.character(seqnames(my_peak)))))[1]
+
+if(is.na(match_idx)) stop(paste("No match", i))
+
+dati_xls <- xls[match_idx, ]
+
+#extract values for labels
+pileup_val   <- as.numeric(dati_xls$pileup)
+fc_effective <- as.numeric(dati_xls$fold_enrichment)
+bg_colored <- pileup_val / fc_effective
+
+#track signal
+strack <- DataTrack(range = treat_gr, 
+                    name = "Signal", 
+                    type = "histogram", 
+                    fill = "gray70", 
+                    col = "transparent")
+
+#background line
+ltrack <- DataTrack(range = lambda_gr, 
+                    name = "Background", 
+                    type = "polygon",
+                    type = "l", 
+                    col = "red", 
+                    lwd = 3) 
+
+#overlay
+otrack <- OverlayTrack(trackList = list(strack, ltrack))
+
+#peaks track
+labels <- rep(" ", length(peaks)); labels[i] <- "TARGET"
+colors <- rep("royalblue", length(peaks)); colors[i] <- "red"
+ptrack <- AnnotationTrack(peaks, name = "Peaks", id = labels, showId = TRUE,
+                          fill = colors, col = "transparent", just.group = "above")
+
+
+#Add a Genome Axis (improves styling and readability)
+atrack <- GenomeAxisTrack(add53 = TRUE, add35 = TRUE)
+
+## ADDING SYMBOL LABEL INSTEAD OF TRANSCRIPT ID
+#Extraction of data in the peak region
+gene_data <- ensembldb::getGeneRegionTrackForGviz(ensdb_dro, 
+                                        chromosome = as.character(seqnames(my_peak)), 
+                                        start = start(my_peak) - 10000, 
+                                        end = end(my_peak) + 10000)
+
+#Manual substitution of Symbol instead of Transcript ID
+gene_data$transcript <- ifelse(!is.na(gene_data$symbol) & gene_data$symbol != "", 
+                               gene_data$symbol, 
+                               gene_data$gene)
+
+#track with symbol and not ID
+gtrack <- GeneRegionTrack(gene_data,
+                          name = "Genes",
+                          transcriptAnnotation = "transcript", 
+                          collapseTranscripts = "longest",     
+                          fill = "#8282d2", 
+                          col = "transparent")
+
+plotTracks(list(atrack, otrack, ptrack, gtrack),
+           chromosome = as.character(seqnames(my_peak)),
+           from = start(my_peak) - 10000, 
+           to = end(my_peak) + 10000,
+           showId = TRUE,           
+           geneSymbol = TRUE,      
+           main = paste0("Peak n. ", peaks_filtered$old_index[i], " | Fold Change: ", round(fc_effective, 2), "\n",
+                         "Local Background (Avg): ", round(bg_colored, 2), " reads"),
+           cex.main = 0.9,
+           fontface.main = 2,
+           ylim = c(0, max(pileup_val * 1.5, 50)))
+```
+
+#### Fold Change: the signal enrichment relative to the estimated local background model
+#### Background (Red line): the expected noise level calculated by MACS based on the local genomic context
+
+## REPORT
+#### How many reads (and what percentage) were mapped
+```{bash engine.opts='-l', eval=TRUE}
+samtools flagstat aligned/aligned.bam | grep "mapped ("
+```
+#### How many peaks were found
+```{r, eval=TRUE}
+length(peaks)
+```
+
+
