@@ -1,0 +1,140 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-03-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE,  message = FALSE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+  library(magick)
+})
+ah <- AnnotationHub()
+ensdb <- ah[["AH89211"]]
+
+setwd("~/Desktop/ethEpigen2026_material/week04")
+```
+
+## Find and download from ENCODE the peaks (i.e. bed-like format) for p300, H3K27ac and H3K27me3 in mouse embryonic stem cells (mESC) and in one differentiated tissue (heart):
+```{r, eval=FALSE}
+options(timeout=1800)
+
+download.file("https://www.encodeproject.org/files/ENCFF097ULJ/@@download/ENCFF097ULJ.bed.gz", "p300_heart.bed.gz") #2month old
+R.utils::gunzip("p300_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF653YVR/@@download/ENCFF653YVR.bed.gz", "p300_mESC.bed.gz")
+R.utils::gunzip("p300_mESC.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF723ZZS/@@download/ENCFF723ZZS.bed.gz", "H3K27ac_heart.bed.gz")
+R.utils::gunzip("H3K27ac_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF212HAG/@@download/ENCFF212HAG.bed.gz", "H3K27ac_mESC.bed.gz")
+R.utils::gunzip("H3K27ac_mESC.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF183KJW/@@download/ENCFF183KJW.bed.gz", "H3K27me3_heart.bed.gz")
+R.utils::gunzip("H3K27me3_heart.bed.gz")
+
+download.file("https://www.encodeproject.org/files/ENCFF105NKG/@@download/ENCFF105NKG.bed.gz", "H3K27me3_mESC.bed.gz")
+R.utils::gunzip("H3K27me3_mESC.bed.gz")
+
+#1.Create the folder
+dir.create("peaks4")
+
+#2.Move the .bed files into that folder
+file.rename(list.files(pattern = "\\.bed$"), 
+            paste0("peaks4/", list.files(pattern = "\\.bed$")))
+
+```
+
+## Comparing the signals across the two tissues
+### 1. What is the proportion of TSS that overlap H3K27ac, H3K27me3, and the combination of both, in each tissue?
+```{r, results='hold'}
+mouse_transcripts <- transcripts(ensdb)
+tss <- promoters(mouse_transcripts, upstream = 0, downstream = 1)
+
+#load the peaks
+peakfiles <- list.files("peaks4", full.names = TRUE)
+# then give them meaningful names
+names(peakfiles) <- gsub("\\.bed","",basename(peakfiles))
+# then loop through them and read them:
+peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+# peaks contains all the objects
+
+#Force the Peaks to Ensembl Style 
+for(i in seq_along(peaks)) {
+  #This converts "chr1" -> "1", "chrX" -> "X", etc.
+  seqlevelsStyle(peaks[[i]]) <- "Ensembl"
+}
+
+#Heart
+num_tss_heart_H3K27ac <- sum(overlapsAny(tss, peaks$H3K27ac_heart))
+num_tss_haert_H3K27me3 <- sum(overlapsAny(tss, peaks$H3K27me3_heart))
+num_tss_heart_one <- sum(overlapsAny(tss, peaks$H3K27ac_heart) | overlapsAny(tss, peaks$H3K27me3_heart))
+num_tss_heart_both <- sum(overlapsAny(tss, peaks$H3K27ac_heart) & overlapsAny(tss, peaks$H3K27me3_heart))
+cat ("The proportion of TSS that overlap H3K27ac in heart:", round(num_tss_heart_H3K27ac/length(tss)*100) , "% \n")
+cat ("The proportion of TSS that overlap H3K27me3 in heart:", round(num_tss_haert_H3K27me3/length(tss)*100), "% \n")
+cat ("The proportion of TSS that overlap H3K27ac OR H3K27me3 in heart:", round(num_tss_heart_one/length(tss)*100), "% \n")
+cat ("The proportion of TSS that overlap H3K27ac AND H3K27me3 in heart:", round(num_tss_heart_both/length(tss)*100), "% \n")
+cat("\n")
+
+#mESC
+num_tss_mESC_H3K27ac <- sum(overlapsAny(tss, peaks$H3K27ac_mESC))
+num_tss_mESC_H3K27me3 <- sum(overlapsAny(tss, peaks$H3K27me3_mESC))
+num_tss_mESC_one <- sum(overlapsAny(tss, peaks$H3K27ac_mESC) | overlapsAny(tss, peaks$H3K27me3_mESC))
+num_tss_mESC_both <- sum(overlapsAny(tss, peaks$H3K27ac_mESC) & overlapsAny(tss, peaks$H3K27me3_mESC))
+cat ("The proportion of TSS that overlap H3K27ac in mESC:", round(num_tss_mESC_H3K27ac/length(tss)*100), "% \n")
+cat ("The proportion of TSS that overlap H3K27me3 in mESC:", round(num_tss_mESC_H3K27me3/length(tss)*100), "% \n")
+cat ("The proportion of TSS that overlap H3K27ac OR H3K27me3 in mESC:", round(num_tss_mESC_one/length(tss)*100), "% \n")
+cat ("The proportion of TSS that overlap H3K27ac AND H3K27me3 in mESC:", round(num_tss_mESC_both/length(tss)*100), "% \n")
+
+
+```
+
+#### It is clear how TSS is low enriched of H3K27me3, indeed this is a repressive mark. In contrast, is it possible to see a significant percentage of TSS site entiched with the active H3K27ac mark. Also, we can't find overlap between H3K27ac and H3K27me3, meaning that they could be mutually exclusive, reflective their opposite function. 
+
+
+### 2. What is the relationship between the 3 signals (p300, H3K27ac, and H3K27me3), and is it the same in both tissues? 
+```{r, results='hold'}
+#subset peaks by element names
+peaks_heart <- peaks[c("H3K27ac_heart", "H3K27me3_heart", "p300_heart")]
+peaks_mESC <- peaks[c("H3K27ac_mESC", "H3K27me3_mESC", "p300_mESC")]
+
+regionOverlaps(peaks_heart)
+UpSet(make_comb_mat(regionsToUpset(peaks_heart, nsets=length(peaks_heart))))
+
+regionOverlaps(peaks_mESC)
+UpSet(make_comb_mat(regionsToUpset(peaks_mESC, nsets=length(peaks_heart))))
+```
+
+#### In both Heart and mESC there is no overlapping between H3K27ac peaks and H3K27me3, concording to their opposite functional role. Futhermore the peaks of p300 are overlapping in both tissues with H3K27ac peaks, so probably p300 is recruited more frequently thanks to this specific histone modification.
+
+### 3. What is the relationship between regulatory elements active in mESC and in the differentiated tissue?
+### How many mESC peaks have been conserved in Heart?
+```{r, results='hold'}
+
+mESC_in_heart_ac <- sum(overlapsAny(peaks$H3K27ac_mESC, peaks$H3K27ac_heart))
+mESC_in_heart_me3 <- sum(overlapsAny(peaks$H3K27me3_mESC, peaks$H3K27me3_heart))
+mESC_in_heart_p300 <- sum(overlapsAny(peaks$p300_mESC, peaks$p300_heart))
+cat ("How many H3K27ac peaks of mESC remain conserved till differentiated heart?", round(mESC_in_heart_ac/length(peaks$H3K27ac_mESC)*100), "% \n")
+cat ("How many H3K27me3 peaks of mESC remain conserved till differentiated heart?", round(mESC_in_heart_me3/length(peaks$H3K27me3_mESC)*100), "% \n")
+cat ("How many p300 peak of mESC remain conserved till differentiated heart?", round(mESC_in_heart_p300/length(peaks$p300_mESC)*100), "% \n")
+
+cat ("Total H3K27ac_mESC peaks in mESC vs Heart: ", round(length(peaks$H3K27ac_mESC)), "vs", length(peaks$H3K27ac_heart), " \n")
+cat ("Total H3K27me3_mESC peaks in mESC vs Heart: ", round(length(peaks$H3K27me3_mESC)), "vs", length(peaks$H3K27me3_heart), " \n")
+```
+
+#### A surprising facts emerging from this last data is that only 25% of epigenetic peaks have been conserved from mESC to heart, then the 75% of these epigenetics peaks have been established de novo during development. Futhermore it's possible to observe that the repressive peaks H3K27me3 remained the same amount, they just change the locus; while the active peaks H3K27ac have almost doublet, suggesting that the heart needs more regulatory elements to maintain its identity rather than mESC.
+
+
+
+
+
