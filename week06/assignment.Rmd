@@ -1,0 +1,206 @@
+---
+title: "assignment"
+output: html_document
+author: "Marco Fiorani Borraccino"
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=FALSE, message=FALSE,}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(GenomicRanges)
+  library(ggplot2)
+  library(memes) # for the meme-based methods -- COMMENT OUT when using alternatives
+  library(motifmatchr) # for scanning sequences for matches of given motifs
+  library(Biostrings) # for handling sequences
+  library(MotifDb) # database of motifs
+  library(TFBSTools) # for handling some motif formats
+  library(universalmotif) # for converting motifs to various formats
+  library(PWMEnrich) # for R-based motif enrichment analysis
+  library(GenomeInfoDb)
+})
+```
+
+### Downloading POU5F1/Oct4 peaks found on chromosome 1,2,3 of hESC: 
+```{r}
+download.file("https://www.encodeproject.org/files/ENCFF614KWI/@@download/ENCFF614KWI.bed.gz", "hESC_POU5F1_ENCFF614KWI.bed.gz")
+peaks <- rtracklayer::import("hESC_POU5F1_ENCFF614KWI.bed.gz", format="NarrowPeak")
+seqlevelsStyle(peaks) <- "Ensembl"  # to change the convention of the chromosome names to ensembl (i.e. without 'chr')
+
+#Filter only the three biggest chromosomes (due to my limited computing power)
+peaks_filtered <- peaks[seqnames(peaks) %in% c("1", "2", "3")]
+#Drop the unused chromosome levels from the peaks object
+peaks_filtered <- GenomeInfoDb::keepSeqlevels(peaks_filtered, c("1", "2", "3"), pruning.mode = "coarse")
+```
+
+### Downloading the corresponding genome of the experiment 
+```{r}
+ah <- AnnotationHub()
+genome <- ah[["AH106283"]] #GRCh38
+#Importing only chr 1,2,3
+hgenome <- rtracklayer::import(genome, which = GenomicRanges::GRanges(c("1", "2", "3"), IRanges::IRanges(1, seqlengths(genome)[c("1", "2", "3")])))
+names(hgenome) <- c("1", "2", "3")
+
+#Finding right ID (AHXXXXX)
+#grch38_matches <- AnnotationHub::query(ah, c("TwoBit", "Homo sapiens", "GRCh38"))
+#grch38_matches
+```
+
+### Motif scanning
+#### Getting the desired motif
+```{r, results = 'hold'}
+# we search for "POU5F1" in the motif database
+motifs <- query(MotifDb, c("POU5F1"))
+# there are several matching motifs:
+names(motifs)
+#Choosing the most updated, so 2024, version 2:
+motif <- motifs[["Hsapiens-jaspar2024-POU5F1-MA1115.2"]]
+motif
+view_motifs(motif)
+```
+
+## Identify the instances of the factor’s motif in my hgenome
+### 1. Of all the peaks, what proportion contains a motif for the factor?
+```{r, results = 'hold'}
+#Convert the genome to fasta
+Biostrings::writeXStringSet(hgenome, "hgenome.fa")
+#Convert the motif to a format that this package will accept
+motif_converted <- universalmotif::convert_motifs(motif, class="TFBSTools-PWMatrix")
+
+#Get raw counts (not probabilities) for the whole genome
+genome_counts <- colSums(Biostrings::alphabetFrequency(hgenome))
+#Extract only A, C, G, T
+acgt_counts <- genome_counts[c("A", "C", "G", "T")]
+#Calculate the proportions (renormalize to 1): background of my hgenome with chr1,2,3 calculated by matchMotifs by default
+my_bg <- acgt_counts / sum(acgt_counts)
+#Calculate my_threshold for a specific pvalue
+my_threshold_00001 <- universalmotif::motif_pvalue(motif_converted, pvalue = 0.00001, bkg = my_bg)
+my_threshold_0001 <- universalmotif::motif_pvalue(motif_converted, pvalue = 0.0001, bkg = my_bg)
+my_threshold_001 <- universalmotif::motif_pvalue(motif_converted, pvalue = 0.001, bkg = my_bg)
+my_threshold_01 <- universalmotif::motif_pvalue(motif_converted, pvalue = 0.01, bkg = my_bg)
+
+#Get the genomic positions of each motif match using p.value = 1 (I'll filter by score afterwards, I just want to plot the histograms of all scores)
+moi_withFasta <- motifmatchr::matchMotifs(motif_converted, subject=peaks_filtered, genome=Rsamtools::FaFile("hgenome.fa"), out="positions", p.cutoff = 1)[[1]]
+moi_default <- motifmatchr::matchMotifs(motif_converted, subject=peaks_filtered, genome=Rsamtools::FaFile("hgenome.fa"), out="positions")[[1]]
+
+#Histograms with all possible matches (p.cutoff = 1)
+h<-hist(moi_withFasta$score)
+#Add the vertical line at my_threshold_
+abline(v = my_threshold_00001, col = "red", lwd = 2, lty = 2)
+abline(v = my_threshold_0001, col = "orange", lwd = 2, lty = 2)
+abline(v = my_threshold_001, col = "gold", lwd = 2, lty = 2)
+abline(v = my_threshold_01, col = "yellow", lwd = 2, lty = 2)
+# pos = 2 sposta il testo a sinistra della coordinata x
+text(x = my_threshold_00001, y = max(h$counts)-10000, labels = "pvalue = 0.00001", pos = 2, col = "red")
+text(x = my_threshold_0001, y = max(h$counts)-5000, labels = "pvalue = 0.0001", pos = 2, col = "orange")
+text(x = my_threshold_001, y = max(h$counts)-2000, labels = "pvalue = 0.001", pos = 2, col = "gold")
+text(x = my_threshold_01, y = max(h$counts), labels = "pvalue = 0.01", pos = 2, col = "yellow")
+#Filter by my_threshold == pvalue = 0.00001
+moi_00001 <- moi_withFasta[moi_withFasta$score >= my_threshold_00001]
+moi_0001 <- moi_withFasta[moi_withFasta$score >= my_threshold_0001]
+moi_001 <- moi_withFasta[moi_withFasta$score >= my_threshold_001]
+moi_01 <- moi_withFasta[moi_withFasta$score >= my_threshold_01]
+
+#Histogram of filtered moi per pvalue
+hist(moi_00001$score, 
+     breaks = seq(0, 20, by = 1), 
+     main = "Motif Match Scores pval 0.00001 (Default)",
+     xlab = "Score")
+abline(v = my_threshold_00001, col = "red", lwd = 2, lty = 2)
+hist(moi_0001$score, 
+     breaks = seq(0, 20, by = 1), 
+     main = "Motif Match Scores pval 0.0001",
+     xlab = "Score")
+abline(v = my_threshold_0001, col = "orange", lwd = 2, lty = 2)
+hist(moi_001$score, 
+     breaks = seq(0, 20, by = 1), 
+     main = "Motif Match Scores pval 0.001",
+     xlab = "Score")
+abline(v = my_threshold_001, col = "gold", lwd = 2, lty = 2)
+hist(moi_01$score, 
+     breaks = seq(0, 20, by = 1), 
+     main = "Motif Match Scores pval 0.01",
+     xlab = "Score")
+abline(v = my_threshold_01, col = "yellow", lwd = 2, lty = 2)
+
+#Found number of peaks with at least one motif and the percentage 
+peaks_with_atleast1_motif_00001 <- subsetByOverlaps(peaks_filtered, moi_00001)
+peaks_with_atleast1_motif_0001 <- subsetByOverlaps(peaks_filtered, moi_0001)
+peaks_with_atleast1_motif_001 <- subsetByOverlaps(peaks_filtered, moi_001)
+peaks_with_atleast1_motif_01 <- subsetByOverlaps(peaks_filtered, moi_01)
+peaks_with_atleast1_motif_default <- subsetByOverlaps(peaks_filtered, moi_default)
+
+#Conclusion printed
+tot_peaks <- length(peaks_filtered)
+
+cat(
+  sprintf("Among all %d peaks:\n", 
+          tot_peaks),
+  
+  sprintf("For a pvalue default we found %d matches and %.2f%% of peaks (%d) contain at least one motif.\n", 
+          length(moi_default), (length(peaks_with_atleast1_motif_default) / tot_peaks) * 100, length(peaks_with_atleast1_motif_default)),
+
+  sprintf("For a pvalue 0.00001 we found %d matches and %.2f%% of peaks (%d) contain at least one motif.\n", 
+          length(moi_00001), (length(peaks_with_atleast1_motif_00001) / tot_peaks) * 100, length(peaks_with_atleast1_motif_00001)),
+  
+  sprintf("For a pvalue 0.0001 we found %d matches and %.2f%% of peaks (%d) contain at least one motif.\n", 
+          length(moi_0001), (length(peaks_with_atleast1_motif_0001) / tot_peaks) * 100, length(peaks_with_atleast1_motif_0001)),
+  
+  sprintf("For a pvalue 0.001 we found %d matches and %.2f%% of peaks (%d) contain at least one motif.\n", 
+          length(moi_001), (length(peaks_with_atleast1_motif_001) / tot_peaks) * 100, length(peaks_with_atleast1_motif_001)),
+  
+  sprintf("For a pvalue 0.01 we found %d matches and %.2f%% of peaks (%d) contain at least one motif.\n", 
+          length(moi_01), (length(peaks_with_atleast1_motif_01) / tot_peaks) * 100, length(peaks_with_atleast1_motif_01))
+)
+
+```
+
+#### The extreme variability of these results based on p-value thresholds demonstrates how easily data can be manipulated to favor a prior hypothesis. By selecting a stringent default like 10^-5, a researcher could argue the transcription factor is highly selective and rarely relies on the motif (26%); conversely, relaxing the threshold to 10^{-3} would "prove" the motif is present in the vast majority of peaks (76%). This flexibility allows authors to essentially "choose" their narrative by shifting a statistical cutoff until the data aligns with their expectations, highlighting the potential for bias in published articles. To maintain scientific integrity, it is essential to use **standardized thresholds** and transparently report results to prevent "p-hacking". 
+
+### 2. Of all instances of that motif in the genome (or in one chromosome), what proportion is bound by the factor (i.e. has a peak)?
+```{r, results = 'hold'}
+# Get the genomic positions of each motif match across the WHOLE genome
+#moi_withFasta <- motifmatchr::matchMotifs(motif_converted, subject=hgenome, genome=Rsamtools::FaFile("hgenome.fa"), out="positions", p.cutoff = 0.1)[[1]]
+genome_moi_default_00001 <- motifmatchr::matchMotifs(motif_converted, subject=hgenome, out="positions")[[1]]
+genome_moi_default_001 <- motifmatchr::matchMotifs(motif_converted, subject=hgenome, out="positions", p.cutoff = 0.001)[[1]]
+
+
+#Debug to solve many past errors (thanks to LLM::Gemini)
+#Force chromosome names
+names(genome_moi_default_00001) <- names(hgenome)
+names(genome_moi_default_001) <- names(hgenome)
+#Convert to a simple Data Frame (This clears the "restricted" metadata)
+df_moi_00001 <- as.data.frame(genome_moi_default_00001)
+df_moi_001 <- as.data.frame(genome_moi_default_001)
+#Rebuild the GRanges from the table
+#Note: 'group_name' is where as.data.frame stores the chromosome names
+genome_moi_gr_00001 <- GRanges(seqnames = df_moi_00001$group_name, ranges = IRanges(start = df_moi_00001$start, end = df_moi_00001$end),score = df_moi_00001$score)
+genome_moi_gr_001<- GRanges(seqnames = df_moi_001$group_name, ranges = IRanges(start = df_moi_001$start, end = df_moi_001$end),score = df_moi_001$score)
+#Standardize naming ("chr1" vs "1")
+seqlevelsStyle(genome_moi_gr_00001) <- seqlevelsStyle(peaks_filtered)
+seqlevelsStyle(genome_moi_gr_001) <- seqlevelsStyle(peaks_filtered)
+genome_moi_default_00001 <- genome_moi_gr_00001
+genome_moi_default_001 <- genome_moi_gr_001
+
+#Find overlaps between motif instances and peaks of Chip-seq
+bound_motifs_00001 <- subsetByOverlaps(genome_moi_default_00001, peaks_filtered)
+bound_motifs_001 <- subsetByOverlaps(genome_moi_default_001, peaks_filtered)
+
+tot_instances_00001 <- length(genome_moi_default_00001)
+tot_instances_001 <- length(genome_moi_default_001)
+instances_bound_00001 <- length(bound_motifs_00001)
+instances_bound_001 <- length(bound_motifs_001)
+
+cat(sprintf("Of the %d motif instances, %d (%.2f%%) overlap a peak (pval: 0.00001/default)\n", tot_instances_00001, instances_bound_00001, (instances_bound_00001/tot_instances_00001)*100))
+cat(sprintf("Of the %d motif instances, %d (%.2f%%) overlap a peak(pval: 0.001)\n", tot_instances_001, instances_bound_001, (instances_bound_001/tot_instances_001)*100))
+```
+
+#### Conclusion:
+#### At the high-stringency **default** threshold (0.0001), the motif appears in roughly 26% of peaks, suggesting that while sequence specificity is a factor, many binding events may involve indirect recruitment or more flexible sequence recognition. Furthermore, the fact that less than 0.1% of genomic motifs are bound underscores that DNA sequence alone is insufficient to recruit the factor. Instead, chromatin accessibility and co-factors could serve as the primary filters, restricting the transcription factor to a tiny subset of available sites.
+
+
+
