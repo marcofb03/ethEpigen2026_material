@@ -1,0 +1,183 @@
+---
+title: "assignment"
+output: html_document
+author: "Marco Fiorani Borraccino"
+date: "2026-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning = FALSE, comment = FALSE}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(memes)
+  library(universalmotif)
+  library(ensembldb)
+  library(ggplot2)
+  library(magick)
+  library(motifmatchr)
+  library(sechm)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(limma)
+  library(betterChromVAR)
+  library(rtracklayer)
+  library(magick)
+})
+
+ah <- AnnotationHub(localHub=TRUE)
+ensdb <- ah[["AH89211"]] # mouse ensembldb object
+```
+
+## Part 1
+### Download the data
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam", "atac.chr19.bam", mode="wb")
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.bam.bai", mode="wb")
+```
+
+### Preparing tracks
+```{r}
+bam <- "atac.chr19.bam"
+
+# create a track using all fragments, computing the coverage at each position (and force Ensembl naming)
+epiwraps::bam2bw(bam, output_bw = "full_cov.bw", paired=TRUE, binWidth=10L, forceSeqlevelsStyle = "Ensembl")
+
+# 1) create a track using only nucleosome-free fragments, the number of cuts/insertion sites at each position
+bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", minFragLength=30, 
+       maxFragLength=120, trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# 2) create a track using only the (10bp) centers of mono-nucleosome fragments
+bam2bw(bam, output_bw = "mono_centers.bw", paired=TRUE, binWidth=5L, minFragLength=140, trim=4L,
+       maxFragLength=220, type="center", extend=10L, forceSeqlevelsStyle = "Ensembl")
+```
+
+### Obtaining the sites with a TBP (TATA-binding protein) motif
+```{r}
+# get all TBP motifs
+tbp_all <- MotifDb::query(MotifDb, c("TBP", "Jaspar"))
+# selecting the most refined 2024 version
+motif_tata <- tbp_all[["NA-jaspar2024-TBP-MA0108.3"]]
+motif2 <- convert_motifs(motif_tata, class="TFBSTools-PFMatrix")
+genome <- ah[["AH68356"]]
+# get the sequence for chr19:
+chr19 <- import(genome)["19"]
+
+# find motif matches across chr19
+moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
+# convert to GRanges
+moi <- as(setNames(moi,names(chr19)), "GRanges")
+
+view_motifs(motif_tata)
+```
+
+### Plotting signal around the motif occurences (all genome)
+```{r, fig.width=8, fig.height=4}
+# we prepare the list of tracks
+tracks <- c("mono_centers.bw", "NF_cuts.bw", "full_cov.bw")
+names(tracks) <- gsub("\\.bw", "", tracks)
+
+# extract signals around the motif occurences
+# we zoom in to 500bp around the motif centers, in windows of 5bp
+sm <- signal2Matrix(tracks, moi, w=5, extend=500)
+
+# plot the signals:
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0")
+```
+
+### Plotting signal around the motif occurences (filtered by open regions)
+```{r}
+# define a 500bp window around each motif center (250bp on each side)
+moi_window <- resize(moi, width = 500, fix = "center")
+
+# extract the coverage (made by 10bp bin) in these specific windows
+cov_data <- import("full_cov.bw", as = "NumericList", which = moi_window)
+
+# sum the signal for each region and assign as the score of that region
+moi$score <- sapply(cov_data, sum, na.rm = TRUE)
+
+# find the value that represents the 80th percentile
+threshold <- quantile(moi$score, 0.80)
+
+# keep only motifs with a score higher than that threshold (20% most open region -> should corresponds to active promoters/genes)
+moi_active <- moi[moi$score > threshold]
+
+# plotting with the motifs on most 20% "active promoters" 
+sm_filtered <- signal2Matrix(tracks, moi_active, w=5, extend=500)
+plotEnrichedHeatmaps(sm_filtered, trim=0.95, multiScale = TRUE, axis_name = "0")
+```
+
+## Summarizing the signals
+
+```{r}
+# To better visualize the relationship between signals, we can overlay them aggregated across regions:
+d <- meltSignals(sm[,c("NF_cuts", "mono_centers")])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + ggtitle("All genome (with and without TBP)")
+
+d <- meltSignals(sm_filtered[,c("NF_cuts", "mono_centers")])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + ggtitle("Active Promoters (with TBP)")
+```
+
+```{r}
+knitr::include_graphics("Pre-initiation-complex_TBP.png")
+```
+
+## Biological interpretation of part 1 plots 
+#### I've filtered by considering only motifs on open regions because most motif matches in the genome are actually inactive and not bound by TBP. This is because TBP is an initiatior factor of transcription and thus binds mainly the active promoters, upstream the TSS. 
+#### Without filtering (the first plot "all genome") I'm averaging thousands of closed, inactive DNA regions together. This creates massive "noise" (like seeing a nucleosome sitting right over the motif) that completely hides the real biology when there is the TF.
+#### With filtering: since I don't have RNAseq of the same sample to see which promoter is actually active and thus probably bound by TBP. As a consequence, I use the simplification to consider a promoter (since the TBP motif is the core of most genes promoter) with open chromatin as an active promoter. Doing so, I'll aim to isolate the true, active binding sites where the factor has actually attached and established a clean biological footprint.
+
+#### The deep dip at position 0 in the "NF_cuts" signal indicates that TBP is actively bound, protecting the DNA from cleavage. In the "mono_centers" track, the two lateral peaks represent the tightly positioned nucleosomes flanking this open chromatin region. Curiously, the central peak at 0 in "mono_centers" is likely not a nucleosome; rather, it represents the massive Pre-Initiation Complex (PIC) itself. Its big size creates steric hindrance that mimics a nucleosome's footprint by preventing Tn5 access.
+
+#### Sometimes a figure is more explicative than words so I attached my png image of the biology that I think there is behind the shape of the last plot.
+
+
+## Part 2
+### Identify motifs that change in accessibility between males and females, and plot a heatmap of the deviations for the top few candidates motifs
+```{r}
+# download and read data
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+se <- readRDS("peakCounts.rds")
+
+# we restrict the regions to standard chromosomes and change the seq level style to match the genome
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
+
+# get a list of motifs, and then scan the regions for matches to them.
+motifs <- query(MotifDb, "HOCOMOCOv13")
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, function(x) gsub("\\..+","",x@name)))
+
+# match motifs to regions
+matches <- motifmatchr::matchMotifs(motifs, se, genome=BSgenome.Mmusculus.UCSC.mm10)
+
+# calculate deviations
+dev <- betterChromVAR(se, matches)
+
+# defefine metadata columns
+dev$group <- ifelse(grepl("FSS", colnames(dev)), "Stressed", "Control")
+dev$sex <- ifelse(grepl("female", colnames(dev)), "Female", "Male")
+
+# Accounting for both variables
+design_sex <- model.matrix(~ group + sex, data=as.data.frame(colData(dev)))
+
+# differential analysis
+fit_sex <- eBayes(lmFit(assay(dev, "z"), design_sex))
+
+# extract results for sex (male vs female)
+res_sex <- as.data.frame(topTable(fit_sex, coef="sexMale", number = Inf))
+res_sex$motif <- row.names(res_sex)
+
+# Volcano Plot
+ggplot(res_sex, aes(logFC, -log10(adj.P.Val), label=motif)) + geom_text()
+
+# Heatmap of top 15 candidates
+sechm(dev, head(row.names(res_sex), 15), gaps_at="sex", assayName = "z")
+```
+
+#### The identified motifs are transcription factor binding sites-primarily from the Zinc Finger (ZNF) and YY (Yin Yang) families that exhibit significant sexual dimorphism in chromatin accessibility. While the heatmap shows a stark contrast between males and females, the z-scores remain virtually identical between the Control and Stressed subgroups within each sex, confirming that these accessibility differences are an innate feature of sexual dimorphism in the hippocampus and not caused by the Forced Swim Stress (FSS) test. By isolating the "sexMale" coefficient in the differential analysis, the volcano plot successfully identifies these motifs as baseline markers of sex-specific chromatin organization that remain stable regardless of stress exposure.
