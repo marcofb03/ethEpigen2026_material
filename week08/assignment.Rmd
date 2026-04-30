@@ -1,0 +1,225 @@
+---
+title: "assignment"
+output: html_document
+author: "Marco Fiorani Borraccino"
+date: "2026-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,  warning = FALSE, comment = FALSE}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(edgeR)
+  library(rtracklayer)
+  library(BiocParallel)
+  library(bsseq)   # Class and tools to analyze bisulfite sequencing data at CpG-level
+  library(DMRcate) # Identification of differentially-methylated regions
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+## Download data
+```{r}
+bs <- readRDS("ESC_astrocytes_BSseq.rds")
+genes <- readRDS("hg19_chr1_genes.rds")
+
+# remove CpGs that have 0 coverage in some samples
+bs <- bs[rowSums(assay(bs, "Cov") > 0) == ncol(bs), ]
+
+# define the experimental design
+design <- model.matrix(~celltype, data=pData(bs))
+methdesign <- modelMatrixMeth(design)
+
+# smooth the data (Required for DMRcate) - betas at single CpG level 
+bs <- BSmooth(bs, BPPARAM=MulticoreParam(2, progress=TRUE))
+```
+
+## Task 1
+```{r }
+# Statistical Testing 
+#Is the methylation level here significantly different in Astrocytes compared to ESCs, and is there enough raw coverage to trust that difference? (using beta data from smooth but raw count)
+#Single CpG with ∆beta (e.g., +20% or -40%) with p-value
+seqAnnot <- sequencing.annotate(bs, methdesign, all.cov=TRUE, coef="celltypeastrocytes")
+
+# Region Finder 
+dmrcateRes <- dmrcate(seqAnnot, C=2, min.cpgs=5)
+#dmrcateRes <- dmrcate(seqAnnot, C=10, min.cpgs=5) #(Higher-resolution but increase in absolute false positive)
+#dmrcateRes <- dmrRanges[dmrRanges$HMFDR < 0.001 & abs(dmrRanges$meandiff) > 0.20] #Filter to restore less false positive
+dmrRanges <- extractRanges(dmrcateRes, genome="hg19")
+
+# identify top 5 DMR on chr1
+dmr_chr1 <- dmrRanges[seqnames(dmrRanges) == "chr1"]
+top5_dmrs <- head(dmr_chr1[order(abs(dmr_chr1$meandiff), decreasing=TRUE)], 5)
+
+# genes found in top 5 DMR regions
+genes_in_top5 <- subsetByOverlaps(genes, top5_dmrs)
+
+
+#Plotting
+
+# --- FIRST PLOT: Gene Body Average (Diluted) ---
+# Extract average methylation in the gene 
+# methylation in genes is diluted by the lenght of the genes itself 
+met_genes <- bsseq::getMeth(bs, regions=genes_in_top5, what="perRegion")
+rownames(met_genes) <- genes_in_top5$symbol
+pheatmap(met_genes, main="Whole-Gene Average Methylation\nfor Top 5 DMR-Associated Genes", name="Mean Methylation")
+
+
+# --- SECOND PLOT: DMR Window Average (Undiluted) ---
+# Extract average methylation in the DMR regions (not the whole gene)
+met_dmr_only <- bsseq::getMeth(bs, regions=top5_dmrs, what="perRegion")
+
+# default labels (coordinates) for all 5 top DMR
+dmr_coords <- paste0(seqnames(top5_dmrs), ":", start(top5_dmrs), "-", end(top5_dmrs))
+hits <- findOverlaps(top5_dmrs, genes)
+dmr_coords[queryHits(hits)] <- genes$symbol[subjectHits(hits)]
+rownames(met_dmr_only) <- dmr_coords
+pheatmap(met_dmr_only,main="Methylation of Top 5 DMRs\n(Labeled by Gene Overlap)",  name="Mean Methylation", cluster_rows = FALSE) 
+```
+
+#### While the first plot shows whole-gene methylation averages that are diluted by the inclusion of non-DMR sequences, the second plot highlights the undiluted signal by focusing strictly on the high-precision DMR windows. 
+#### Analysis shows that only 3 out of the 5 top DMRs physically overlap with gene bodies. Furthermore, two of these top DMRs are situated within the same gene (CR1L). 
+
+## Task 2
+
+```{r}
+# loading data
+ATAC_AstroVsESC<- readRDS("ATAC_AstroVsESC_subset.rds")
+```
+
+#### Two different methods based on two different assumptions:
+#### 1. Change in methylation in locus A can influence change in ATAC in locus B nearby
+#### 2. Change in methylation in locus A can influence change in ATAC in locus A
+
+### Method 1 (Change in methylation in locus A can influence change in ATAC in locus B nearby) - p/FDR = 0.001
+```{r}
+# --- Method 1 (for nearby regions correlation) ---
+
+# find overlapping regions between DMRs and ATAC peaks
+hits_overlaps_DMRvsATAC <- findOverlaps(dmrRanges, ATAC_AstroVsESC)
+head(hits_overlaps_DMRvsATAC, 5)
+# meandiff: Change in methylation (Positive = Hypermethylated in Astrocytes)
+# logFC: Change in accessibility (Positive = More accessible in Astrocytes)
+df_comp <- data.frame(
+  meth_diff = dmrRanges$meandiff[queryHits(hits_overlaps_DMRvsATAC)],
+  meth_fdr  = dmrRanges$min_smoothed_fdr[queryHits(hits_overlaps_DMRvsATAC)],
+  atac_diff = ATAC_AstroVsESC$logFC[subjectHits(hits_overlaps_DMRvsATAC)],
+  atac_fdr  = ATAC_AstroVsESC$FDR[subjectHits(hits_overlaps_DMRvsATAC)]
+)
+#Filter by significance
+df_comp <- subset(df_comp, meth_fdr < 0.001 & atac_fdr < 0.001)
+
+# --- Correlation ---
+# Correlation Coefficient Spearman
+cor_spearman <- cor(df_comp$meth_diff, df_comp$atac_diff, method = "spearman")
+# Slope 
+fit <- lm(atac_diff ~ meth_diff, data = df_comp)
+slope <- coef(fit)["meth_diff"]
+
+# Scatter plot of differences
+ggplot(df_comp, aes(x = meth_diff, y = atac_diff)) +
+  geom_point(alpha = 0.5, color = "darkblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(
+    title = "DMR-centric Peaks Correlation",
+    x = "Methylation Change (mean diff)",
+    y = "Accessibility Change (logFC)",
+    subtitle = paste0("Astrocytes vs ESCs | Spearman r = ", round(cor_spearman, 3),
+                      "\nSlope = ", round(slope, 3), " | n = ", nrow(df_comp))
+  ) +
+  theme_minimal()
+```
+
+### Method 2 (Change in methylation in locus A can influence change in ATAC in the same locus A) - p/FDR = 0.001
+```{r}
+# --- Method 2 (for same loci correlations) ---
+# Filter only only CpGs in ATAC peaks
+bs_targeted <- subsetByOverlaps(bs, ATAC_AstroVsESC)
+
+# Run the statistical tests over them to see which peaks contain a DMR 
+seqAnnot_targeted <- sequencing.annotate(bs_targeted, methdesign, all.cov = TRUE, coef = "celltypeastrocytes")
+cpg_ranges <- seqAnnot_targeted@ranges
+
+# map CpG results to ATAC Peaks
+cpg_hits <- findOverlaps(cpg_ranges, ATAC_AstroVsESC)
+
+# Manual Aggregation (One Peak = One DMR)
+df_peak_dmr <- data.frame(
+    peak_id = subjectHits(cpg_hits),
+    cpg_p   = mcols(cpg_ranges)$rawpval[queryHits(cpg_hits)],
+    cpg_diff = mcols(cpg_ranges)$diff[queryHits(cpg_hits)]
+) %>%
+    group_by(peak_id) %>%
+    summarise(
+        # Total CpGs in peak
+        n_total = n(),
+        # Count of SIGNIFICANT CpGs (p < 0.001)
+        n_sig = sum(cpg_p < 0.001, na.rm = TRUE),
+        # Average methylation change across all CpGs in the peak
+        mean_meth_diff = mean(cpg_diff, na.rm = TRUE),
+        # Combine p-values using Stouffer's method
+        combined_p = {
+            # Handle edge cases with very small p-values
+            z_scores <- qnorm(1 - pmax(cpg_p, 1e-15) / 2)
+            2 * (1 - pnorm(abs(sum(z_scores) / sqrt(n()))))
+        }
+    )
+
+#print(head(df_peak_dmr,5)) debug
+
+# Filter peaks with DMR inside
+# Rule: At least 5 SIGNIFICANT CpGs per 300bp of peaks
+atac_info <- data.frame(
+    peak_id = 1:length(ATAC_AstroVsESC),
+    peak_width = width(ATAC_AstroVsESC),
+    atac_logFC = ATAC_AstroVsESC$logFC,
+    atac_fdr = ATAC_AstroVsESC$FDR
+)
+
+df_final <- df_peak_dmr %>%
+    inner_join(atac_info, by = "peak_id") %>%
+    mutate(n_sig_required = ceiling((peak_width / 300) * 5)) %>%
+    # FILTER: Must meet significant CpG density
+    dplyr::filter(n_sig >= n_sig_required) %>%
+    # FILTER: ATAC peak must be significant
+    dplyr::filter(atac_fdr < 0.001)
+
+# Assign FDR to the Methylation Signal
+df_final$combined_meth_fdr <- p.adjust(df_final$combined_p, method = "fdr")
+
+# Final Filter for significant Methylation FDR < 0.001
+df_final_sig <- df_final %>% dplyr::filter(combined_meth_fdr < 0.001)
+#print(head(df_final_sig,5)) debug
+
+# --- Correlation ---
+# Correlation Coefficient Spearman
+correlation_val <- cor(df_final_sig$mean_meth_diff, df_final_sig$atac_logFC, method = "spearman")
+#Slope
+fit <- lm(atac_logFC ~ mean_meth_diff, data = df_final_sig)
+slope <- coef(fit)["mean_meth_diff"]
+
+#plot
+ggplot(df_final_sig, aes(x = mean_meth_diff, y = atac_logFC)) +
+    geom_point(alpha = 0.5, color = "darkgreen") +
+    geom_smooth(method = "lm", color = "red") +
+    labs(
+        title = "Peak-Centric DMR Correlation",
+        subtitle = paste0("Filtered for Sig CpG Density | Spearman r = ", round(correlation_val, 3),
+                      "\nSlope = ", round(slope, 3), " | n = ", nrow(df_final_sig)),
+        x = "Methylation Change",
+        y = "Accessibility Change (logFC)"
+    ) +
+    theme_minimal()
+```
+
+#### Method 1 assumes that regulatory crosstalk occurs within a broader genomic neighborhood, where a Differentially Methylated Region (DMR) might influence accessibility at nearby ATAC-seq peaks. 
+#### Method 2, conversely, assumes a strictly local coupling where only the methylation status physically inside the open chromatin site governs its accessibility. 
+#### Biologically, Method 2 provides higher spatial precision by filtering out "bystander" CpGs in flanking regions and focusing solely on the regulatory core. While both methods yield similar Spearman correlation coefficients (-0.32 and -0.29 respectively), proving the overall direction and consistency of the relationship are biologically stable, Method 2 results in a steeper slope.
+#### These plots reveals a consistent inverse relationship (slope = -0.39) where localized methylation within the regulatory core acts as a significant, albeit partial (Spearman r = -0.29), driver of decreased chromatin accessibility
