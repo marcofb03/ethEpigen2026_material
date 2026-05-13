@@ -1,0 +1,182 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-05-11"
+author: "Marco Fiorani Borraccino"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(magick)
+  library(rGREAT) # Gene Ontology enrichment among genomic regions
+  library(org.Hs.eg.db)
+  library(AnnotationDbi)
+  library(dplyr)
+  library(UpSetR)
+})
+setwd("~/Desktop/ethEpigen2026_material/week09")
+```
+
+## Prepare the regions and the tracks
+```{r}
+tracks <- list.files(pattern="bw$")
+names(tracks) <- gsub("\\.bw$", "", tracks)
+
+# Merging Signals
+# Focus on high-confidence peaks from each factor to define the universe of regions
+peaks <- list.files(pattern="bed$")
+names(peaks) <- gsub("\\.bed$", "", peaks)
+# we first import the peaks
+peaks <- lapply(peaks, rtracklayer::import.bed)
+# we'll focus on the high-quality peaks
+peaks <- lapply(peaks, FUN=function(x) x[x$score>800])
+# we get the union of non-redundant regions
+regions <- reduce(unlist(GRangesList(peaks)))
+
+
+# Not merging signals
+Creb1_reg <- rtracklayer::import.bed("Creb1.bed")
+Creb3_reg <- rtracklayer::import.bed("Creb3.bed")
+Creb3L1_reg <- rtracklayer::import.bed("Creb3L1.bed")
+```
+
+## Plot of the three proteins
+```{r}
+ese <- signal2Matrix(tracks, regions, extend=2000) #n regions = 2269
+plotEnrichedHeatmaps(ese)
+```
+
+## Clustering 
+```{r}
+# Non scaled
+# Find most suitable k
+cl2 <- clusterSignalMatrices(ese, k=2:10)
+#ggplot(cl2$varExplained, aes(k, varExplained)) + geom_line()
+set.seed(1)
+cl_noscale <- clusterSignalMatrices(ese, k=4) #>85%
+rowData(ese)$cluster_noscale <- cl_noscale
+
+# Scaled
+cl2 <- clusterSignalMatrices(ese, k=2:10, scaleRows = TRUE)
+ggplot(cl2$varExplained, aes(k, varExplained)) + geom_line()
+set.seed(1)
+cl_scaled <- clusterSignalMatrices(ese, k=4, scaleRows = TRUE)
+rowData(ese)$cluster_scaled <- cl_scaled
+
+# Plot
+#plotEnrichedHeatmaps(ese, row_split=rowData(ese)$cluster_noscale, colors=c("white","darkred")) 
+#plotEnrichedHeatmaps(ese, row_split=rowData(ese)$cluster_scaled, colors=c("white","darkred")) # == row_split="cluster",
+
+#d <- meltSignals(ese, splitBy=cl_noscale)
+#ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + facet_wrap(~split)
+d_2 <- meltSignals(ese, splitBy=cl_scaled)
+ggplot(d_2, aes(position, mean, colour=sample)) + geom_line(size=1.2) + facet_wrap(~split)
+```
+
+
+
+### Plotting the clusters by density:
+```{r}
+mycolors <- c("1"="red", "2"="blue", "3"="darkgreen", "4"="black")
+plotEnrichedHeatmaps(ese, row_split="cluster_scaled", mean_color=mycolors, colors=c("white","darkred"), scale_rows = "global")
+```
+
+### Correlation Matrix with UpSet
+```{r}
+m <- make_comb_mat(regionsToUpset(peaks))
+UpSet(m)
+```
+
+## Enrichment analysis
+
+### Find how many peaks belongs to transcripts with known vs unknown function
+```{r}
+# we first split the regions by cluster_scaled:
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster_scaled) # 383 389 813 684 - lengths(split_regions)
+
+# Prepare the 'Known' list once (discovered transcript)
+known_ensembl <- keys(org.Hs.eg.db, keytype="ENSEMBL")
+
+analyze_peak_status <- function(cluster_gr, background_regions) {
+  # Run GREAT to find annotated trasncript (function by GO:BP)
+  res <- great(cluster_gr, gene_sets = "GO:BP", tss_source = "Gencode_v19", background = background_regions)
+  # Get Associations
+  assoc <- getRegionGeneAssociations(res)
+  # Classify
+  classification <- sapply(assoc$annotated_genes, function(g) {
+    if (length(g) == 0) return("No Gene Assigned")
+    clean_g <- gsub("\\..*$", "", g)
+    if (any(clean_g %in% known_ensembl)) return("Known")
+    return("Unknown")
+  })
+  # Return the summary table
+  return(table(classification))
+}
+
+# This runs the function for each element in split_regions list (1 through 4)
+all_cluster_results <- lapply(split_regions, function(x) {
+  analyze_peak_status(x, regions)
+})
+names(all_cluster_results) <- paste0("Cluster_", names(split_regions))
+
+print(all_cluster_results)
+
+```
+### Correlation of GO between clusters
+```{r}
+# Process every cluster, extract tables, and bind into one master dataframe
+results_all <- lapply(names(split_regions), function(cl_name) {
+  res <- great(split_regions[[cl_name]], 
+               gene_sets = "GO:BP", # MF and CC has been tested too
+               tss_source = "Gencode_v19",
+               background = regions, 
+               cores = 2)
+  getEnrichmentTables(res) %>% 
+    mutate(cluster = cl_name)
+}) %>% bind_rows()
+
+# Keep only terms where raw p-value < 0.05
+sig_results <- results_all %>% filter(p_value < 0.05)
+
+# Create a list of IDs for each cluster
+id_list <- split(sig_results$id, sig_results$cluster)
+all_unique_ids <- unique(sig_results$id)
+
+# Create the binary membership matrix (Rows = GO IDs, Cols = Clusters)
+membership <- do.call(cbind, lapply(id_list, function(x) all_unique_ids %in% x))
+colnames(membership) <- names(id_list)
+
+# Generate the Intersection Counts (How many terms overlap)
+overlap_counts <- t(membership) %*% membership
+
+print("--- GO Terms MATRIX (p_value < 0.05) ---")
+print(overlap_counts)
+
+
+# Filter for significant terms (e.g., p_adjust < 0.05)
+sig_counts <- results_all[results_all$p_adjust < 0.05, ]
+
+# Print the count per cluster
+print("--- GO Terms (p_adjust < 0.05) ---")
+table(sig_counts$cluster)
+
+```
+
+## Discussion
+
+#### I clustered based on scaled data with k = 4, there is roughly 90% of variance explained (plot of clustering) and also visually the four clusters looks different (scaled data). From the "Correlation Matrix with UpSet" it's possibile to capture some of the clusters for example cluster n. 2 is defiened by the high presence of Creb1 and low of Creb3L1/Creb3. Cluster 3 seems corresponding to the second column of correlation matrix with high presence of Creb1/Creb3L1 and low Creb3. It can be claimed that the three proteins interact with eachother, due to their combinatorial presence on the same regions.
+#### From the Enrichment Analysis, I first look if peaks fell onto known or unknown transcripts (unknown function, not the transcripts existence itself). I found that 98% peaks sits in genes with known biological function so here is where we should find the function of these proteins.
+#### Is the single protein to have a defined function or the combination of them (as seen in the four different clusters) produce a different functions ? It's the combination of them ! Probably the different combination of them recruit different complexes with different roles. This is proved by the "Correlation of GO between clusters" code. Here it can be seen that there is no overlap between enriched GO termns on different clusters, this mean that each specific cluster="combination of proteins" have different biological functions.
+#### Are the GO terms found for each cluster statistically enriched compared to all region (whole regions from the experiment, not the entire genome) ? The confidence: almost no GO terms have p_adj < 0.05 but only p_value < 0.05.
+
+## Conclusion
+### Different combination of Creb proteins are correlated with different biological functions.
+
+### P.S. What to do next: watch each cluster GO terms and see which biological functions are correlated to the corresponding combination of Creb proteins. I didn't do that.
