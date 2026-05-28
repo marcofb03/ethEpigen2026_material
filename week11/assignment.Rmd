@@ -1,0 +1,94 @@
+---
+title: "assignment"
+output: html_document
+date: "2026-05-25"
+author: "Fiorani Borraccino Marco, Gudelytė Ieva, Karam Dea"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Hypoxic stress dysregulates functions of glioma-associated myeloid cells through epigenomic and transcriptional programs 
+#### https://www.cell.com/cell-reports/fulltext/S2211-1247(25)00993-3
+
+## **1. What is the topic?** 
+
+### **Background**:
+
+#### Glioblastomas rapidly outgrow their blood supply, creating severe low-oxygen (hypoxic) zones within the tumor. When immune cells, specifically glioma-associated myeloid cells (microglia/macrophages), enter these areas, the lack of oxygen forces them to undergo an identity shift. Instead of fighting the cancer, they are epigenetically reprogrammed to support tumor survival and accumulate fat (lipids) to survive the harsh environment. The authors conducted this study to pinpoint exactly how oxygen deprivation drives this "brainwashing" at the epigenetic level, and to determine if it can be therapeutically reversed.
+
+### **What they did**:
+
+#### Because isolating pure immune cells from a chaotic live tumor limits data quality, the researchers recreated the tumor microenvironment in a controlled lab setting. They cultured myeloid cells under both normal oxygen and artificial hypoxia, testing them alone and in direct co-culture with glioma cells to isolate the exact triggers of cell dysfunction. By using epigenetic sequencing tools like ATAC-seq and H3K27ac profiling, they examined how hypoxia contributes to the loss of chromatin accessibility at healthy immune genes and silencing of master regulators. Finally, they treated the hypoxic cells with an  histone deacetylase (HDAC) inhibitor, a successful epigenetic drug, demonstrating that reversing these DNA modifications can reduce the harmful reprogramming and stop the cells from adopting their tumor-supporting state. <u><em> (They did not perform ATAC/H3K27ac profiling on the drug samples)</em></u> 
+
+### **Other relevant details:**
+
+#### <u><em> In normal oxygen (normoxia), do microglia kill the glioma? </em></u>
+
+#### No, they usually don't. Glioblastoma is incredibly aggressive and secretes chemicals that paralyze the immune system even in normal oxygen. However, in normal oxygen, the microglia are just "suppressed".
+
+#### <u><em> What happens in hypoxia?  </em></u>
+
+#### Hypoxia makes it much worse. It doesn't just suppress the microglia; it actively reprograms them. Under hypoxia, the microglia turn into "lipid-laden" cells, meaning they hoard fat (lipid droplets). These lipid-laden cells are associated with tumor-supportive and immunosuppressive phenotypes.
+
+#### <u><em> Did they prove a drug-mediated functional/phenotypic rescue?  </em></u>
+
+#### The Phenotype: Hypoxia causes massive lipid droplet accumulation inside the myeloid cells. The Rescue: When they applied the HDAC inhibitor, they performed Western Blot H3K27ac and saw that it was rescued; they proved that the lipid droplet accumulation was successfully reversed/prevented.
+
+
+## **2. What data will we be using?**:
+
+###  - Condition Groups to Analyze
+#### M_Norm: Myeloid monoculture in Normoxia (21% O2) (Ground-truth healthy baseline)
+#### M_Hyp: Myeloid monoculture in Hypoxia (1% O2) (Pure oxygen-deprivation effect)
+#### Co_Norm: Myeloid + Glioma co-culture in Normoxia (21% O2) (Pure tumor-contact signaling effect)
+#### Co_Hyp: Myeloid + Glioma co-culture in Hypoxia (1% O2) (The full disease state)
+#### <del>M_Hyp_HDACi: Myeloid monoculture in Hypoxia + HDAC inhibitor (1% O2) (Pure oxygen rescue)</del>
+#### <del>Co_Hyp_HDACi: Myeloid + Glioma co-culture in Hypoxia + HDAC inhibitor (1% O2) (Full disease rescue)</del>
+#### **Since they did not perform ATAC/H3K27ac profiling on the drug samples, we won't consider the drug at all.**
+#### <span style="color: white;">blank line</span>       
+#### ATAC: 4 condition *(2 replicates each) -> total of 542.3 Mb 
+#### CUT&RUN(H3K27ac): 4 condition (*3 replicates each) -> total of 1.6 Gb
+#### **We will consider all available replicates (20 samples in total)**
+
+### - Retrieving Data
+#### GEO: GSE300330 accession number. Format already processed: .bw and .narrowpeak 
+#### https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE300330
+
+
+## **3. What are the analyses we wish to reproduce, or the questions we wish to answer?**
+
+#### This project re-interprets the epigenetic datasets (ATAC-seq and H3K27ac profiling) from the paper. The goal is to decouple whether this immune-cell dysfunction is driven primarily by physical oxygen deprivation, direct tumor signaling, or a synergistic combination of both and studying all the associated epigenetic changes.
+
+#### <span style="color: white;">blank line</span>      
+#### <span style="color: white;">blank line</span>      
+#### <span style="color: white;">blank line</span>      
+#### <span style="color: white;">blank line</span>      
+#### <span style="color: white;">blank line</span>      
+
+## *Suggested some ideas (Not yet confirmed/brainstorming) *
+
+### - Global Landscape Analysis
+
+#### Analysis: Exploratory Data Analysis (EDA) via Principal Component Analysis (PCA) and hierarchical clustering on ATAC-seq and H3K27ac signal intensities across all samples.
+#### What to look for: Do replicates cluster tightly? Does PC1 separate by Oxygen level (Normoxia vs. Hypoxia) or Culture type (Mono vs. Co-culture)? This reveals which stressor dominates global epigenetic reprogramming.
+
+### - Differential Chromatin Dynamics & Deconvolution
+
+#### Analysis: Run differential binding analysis using DESeq2 or DiffBind or EdgeR.
+#### Specific Contrasts & Matrix Logic:
+#### M_Hyp vs. M_Norm: Pinpoints peaks closed/opened exclusively by low oxygen.
+#### Co_Norm vs. M_Norm: Pinpoints peaks altered exclusively by tumor proximity.
+#### Co_Hyp vs. M_Hyp: Reveals if co-culture amplifies or alters the hypoxia response.
+#### Co_Hyp vs. Co_Norm: Reveals if hypoxia amplifies or alters the co-culture response.
+#### What to look for: Identify specific genomic coordinates that lose ATAC-seq accessibility and H3K27ac signals simultaneously…
+
+### - Transcription Factor (TF) Motif Analysis
+
+#### Analysis: Extract the DNA sequences from regions with reduced ATAC-seq/H3K27ac signal in M_Hyp and Co_Hyp. Run a motif enrichment tool (like HOMER or R package motifmatchr).
+#### What to look for: Look for statistical depletion of motifs belonging to myeloid master regulators SPI1 (PU.1) and IRF8. Confirm if hypoxic conditions are linked to changes in these specific master networks…
+
+### - Interpretation Logic 
+
+#### If M_Hyp shares a large proportion of altered peaks with Co_Hyp, this would suggest that oxygen deprivation accounts for much of the epigenetic reprogramming observed under hypoxic co-culture conditions. However, peaks uniquely altered in Co_Hyp, or changes that are stronger in Co_Hyp than in M_Hyp, would indicate additional effects of tumor contact or an interaction between hypoxia and glioma co-culture.
